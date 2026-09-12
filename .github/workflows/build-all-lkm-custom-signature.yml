@@ -1,0 +1,79 @@
+name: Build ALL kernelsu.ko for custom manager signature
+
+# Same as build-lkm-custom-signature.yml but builds every KMI in one run, so the
+# whole matrix of bundled kernel modules accepts the re-signed Manager APK.
+#
+# Local build keystore (alias: ksu-build):
+#   cert size   = 834 bytes = 0x0342
+#   cert sha256 = 58536a0822763d2aaad606b1122857f804ac9df61dc0312195b4f3a415b6c7bd
+
+on:
+  workflow_dispatch:
+    inputs:
+      ddk_release:
+        description: 'DDK release'
+        required: true
+        default: '20260828'
+        type: string
+      expected_size:
+        description: 'Manager certificate size (hex)'
+        required: true
+        default: '0x0342'
+        type: string
+      expected_hash:
+        description: 'Manager certificate SHA-256'
+        required: true
+        default: '58536a0822763d2aaad606b1122857f804ac9df61dc0312195b4f3a415b6c7bd'
+        type: string
+
+jobs:
+  build:
+    name: ${{ matrix.kmi }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Build kernelsu.ko
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd kernel
+          echo "=== KMI: ${{ matrix.kmi }} ==="
+          make clean || true
+          # KSU_GIT_VERSION pinned so KSU_VERSION == 30000 + 2601 == 32601,
+          # matching the Manager's versionCode.
+          CONFIG_KSU=m CC=clang make \
+            KSU_GIT_VERSION=2601 \
+            KSU_EXPECTED_SIZE=${{ inputs.expected_size }} \
+            KSU_EXPECTED_HASH=${{ inputs.expected_hash }} 2>&1 | tee /tmp/ksu-build.log
+          grep -E 'KernelSU version|signature size|signature hash' /tmp/ksu-build.log || true
+          ls -la kernelsu.ko
+          llvm-strip -d kernelsu.ko || true
+
+      - name: Show module metadata
+        run: |
+          cd kernel
+          llvm-strings kernelsu.ko | grep -E '^vermagic=|^name=' || true
+
+      - name: Upload kernelsu.ko
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-ko-${{ matrix.kmi }}-customsig
+          path: kernel/kernelsu.ko
