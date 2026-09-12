@@ -1,0 +1,88 @@
+name: Build kernelsu.ko for custom manager signature
+
+# Builds a kernelsu.ko whose embedded "expected manager signature" matches the
+# locally generated signing certificate, so a re-signed / renamed Manager APK is
+# accepted by the kernel module.
+#
+# Values below are for the local build keystore (alias: ksu-build):
+#   cert size = 834 bytes = 0x0342
+#   cert sha256 = 58536a0822763d2aaad606b1122857f804ac9df61dc0312195b4f3a415b6c7bd
+# Regenerate with:
+#   keytool -exportcert -alias ksu-build -keystore <your.jks> -storepass <pw> -file cert.der
+#   stat -c%s cert.der            -> convert to 0x%04x
+#   sha256sum cert.der
+
+on:
+  workflow_dispatch:
+    inputs:
+      kmi:
+        description: 'KMI to build for'
+        required: true
+        default: 'android15-6.6'
+        type: choice
+        options:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+      ddk_release:
+        description: 'DDK release'
+        required: true
+        default: '20260828'
+        type: string
+      expected_size:
+        description: 'Manager certificate size (hex)'
+        required: true
+        default: '0x0342'
+        type: string
+      expected_hash:
+        description: 'Manager certificate SHA-256'
+        required: true
+        default: '58536a0822763d2aaad606b1122857f804ac9df61dc0312195b4f3a415b6c7bd'
+        type: string
+
+jobs:
+  build-aarch64:
+    name: Build kernelsu.ko (aarch64) for ${{ inputs.kmi }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Build kernelsu.ko
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd kernel
+          echo "=== KMI: ${{ inputs.kmi }} ==="
+          echo "=== expected manager signature: ${{ inputs.expected_size }} / ${{ inputs.expected_hash }} ==="
+          make clean || true
+          # KSU_GIT_VERSION is pinned so that KSU_VERSION == 30000 + 2601 == 32601,
+          # matching the Manager's versionCode (a checkout has only 1 commit).
+          CONFIG_KSU=m CC=clang make \
+            KSU_GIT_VERSION=2601 \
+            KSU_EXPECTED_SIZE=${{ inputs.expected_size }} \
+            KSU_EXPECTED_HASH=${{ inputs.expected_hash }} 2>&1 | tee /tmp/ksu-build.log
+          echo "--- version/signature lines from Kbuild ---"
+          grep -E 'KernelSU version|signature size|signature hash' /tmp/ksu-build.log || true
+          ls -la kernelsu.ko
+          llvm-strip -d kernelsu.ko || true
+
+      - name: Show module metadata
+        run: |
+          cd kernel
+          llvm-strings kernelsu.ko | grep -E '^vermagic=|^name=' || true
+
+      - name: Upload kernelsu.ko
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-ko-${{ inputs.kmi }}-customsig
+          path: kernel/kernelsu.ko
